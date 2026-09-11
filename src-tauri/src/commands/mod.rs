@@ -111,6 +111,13 @@ struct SidecarResponse {
 }
 
 #[tauri::command]
+pub async fn get_video_qualities(app: tauri::AppHandle, url: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        call_sidecar(&app, "get_video_qualities", serde_json::json!({ "url": url }))
+    }).await.map_err(|e| format!("Task failed: {e}"))?
+}
+
+#[tauri::command]
 pub async fn detect_gpu(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || call_sidecar(&app, "detect_gpu", serde_json::json!({})))
         .await

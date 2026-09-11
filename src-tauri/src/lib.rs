@@ -13,6 +13,7 @@ pub fn run() {
             commands::save_app_config,
             commands::list_ai_models,
             commands::detect_gpu,
+            commands::get_video_qualities,
             commands::find_highlights,
             commands::list_sessions,
             commands::load_session,

@@ -151,6 +151,7 @@ export function HighlightSelectionPage() {
       {showProcessDialog && (
         <ProcessConfirmDialog
           clipCount={selectedCount}
+          sourceUrl={session.url}
           captionsAvailable={session.caption_available ?? true}
           onConfirm={(options) => {
             setShowProcessDialog(false);

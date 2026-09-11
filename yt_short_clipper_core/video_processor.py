@@ -24,6 +24,45 @@ VIDEO_FORMAT_SELECTOR = "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
 VIDEO_FORMAT_SORT = ["res", "vcodec:h264", "proto", "br"]
 
 
+def _quality_selector(quality: str) -> str:
+    if quality == "auto":
+        return VIDEO_FORMAT_SELECTOR
+    if not isinstance(quality, str) or not quality.isdecimal() or not 1 <= int(quality) <= 1080:
+        raise ValueError("Invalid source video quality")
+    # An explicit selection must never silently switch resolution.
+    height = int(quality)
+    return f"bestvideo[height={height}]+bestaudio/best[height={height}]"
+
+
+def _available_heights(info: dict) -> list[int]:
+    formats = info.get("formats") or []
+    has_audio = any(f.get("acodec") not in (None, "none") and f.get("vcodec") == "none"
+                    and f.get("url") and not f.get("has_drm") for f in formats)
+    return sorted({int(f["height"]) for f in formats
+                   if isinstance(f.get("height"), (int, float)) and 0 < f["height"] <= 1080
+                   and f.get("vcodec") not in (None, "none") and f.get("url")
+                   and not f.get("has_drm")
+                   and (f.get("acodec") not in (None, "none") or has_audio)}, reverse=True)
+
+
+def get_video_qualities(url: str) -> dict:
+    """Inspect available source resolutions without downloading media."""
+    import yt_dlp
+    _setup_ytdlp_env()
+    opts = {"cookiefile": _get_cookies_path(), "quiet": True, "noplaylist": True,
+            "skip_download": True, "socket_timeout": 20, "retries": 2,
+            "logger": _YTDlpLogger(debug_log)}
+    deno = get_deno_path()
+    if deno and Path(deno).exists():
+        opts.update(js_runtimes={"deno": {"path": deno}}, remote_components=["ejs:github"])
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    heights = _available_heights(info or {})
+    if not heights:
+        raise RuntimeError("No downloadable video quality up to 1080p was found. Refresh the available qualities.")
+    return {"heights": heights}
+
+
 def _parse_timestamp(ts: str) -> float:
     """Convert timestamp HH:MM:SS,mmm or HH:MM:SS.mmm to seconds."""
     ts = ts.replace(",", ".")
@@ -49,10 +88,11 @@ def _find_downloaded_file(output_path: str) -> str:
     raise RuntimeError(f"Downloaded section file not found: {output_path}")
 
 
-def _source_cache_path(url: str, output_path: str) -> Path:
+def _source_cache_path(url: str, output_path: str, quality: str = "auto") -> Path:
     """Return a stable per-video cache path inside the session temp folder."""
+    _quality_selector(quality)
     cache_key = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
-    return Path(output_path).parent / f"_source_1080_{cache_key}.mp4"
+    return Path(output_path).parent / f"_source_quality_{quality}_{cache_key}.mp4"
 
 
 def _find_cached_source(cache_path: Path) -> str | None:
@@ -75,7 +115,14 @@ def _cut_local_section(
     end_time: str,
     ffmpeg_path: str,
 ) -> str:
-    """Stream-copy one section from a downloaded source file."""
+    """Cut one section at the requested timestamps and reset its timeline.
+
+    Stream-copying after an input seek can preserve media from the previous
+    keyframe. Captions are timed from the exact highlight start, so that
+    extra media makes the captions appear before the matching speech. Decode
+    and encode the selected section so FFmpeg can discard the keyframe
+    preroll, then reset video and audio timestamps to zero.
+    """
     import subprocess
     import sys
 
@@ -89,8 +136,17 @@ def _cut_local_section(
         "-ss", start_time,
         "-i", source_path,
         "-t", f"{duration:.3f}",
-        "-c", "copy",
-        "-avoid_negative_ts", "make_zero",
+        "-map", "0:v:0",
+        "-map", "0:a:0?",
+        "-vf", "setpts=PTS-STARTPTS",
+        "-af", "asetpts=PTS-STARTPTS",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-movflags", "+faststart",
         cut_output,
     ]
     flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -253,6 +309,7 @@ def download_video_section(
     output_path: str,
     log: LogFn | None = None,
     prefer_cached_source: bool = False,
+    source_quality: str = "auto",
 ) -> str:
     """Download a specific section of a YouTube video.
 
@@ -263,7 +320,7 @@ def download_video_section(
     end_clean = end_time.replace(",", ".")
 
     if is_ytdlp_module_available():
-        return _download_section_module(url, start_clean, end_clean, output_path, log, prefer_cached_source)
+        return _download_section_module(url, start_clean, end_clean, output_path, log, prefer_cached_source, source_quality)
     else:
         raise RuntimeError(
             "yt-dlp Python module is required for downloading video sections. "
@@ -278,9 +335,13 @@ def _download_section_module(
     output_path: str,
     log: LogFn,
     prefer_cached_source: bool = False,
+    source_quality: str = "auto",
 ) -> str:
     import yt_dlp
 
+    format_selector = _quality_selector(source_quality)
+    quality_label = "best available quality up to 1080p" if source_quality == "auto" else f"{source_quality}p"
+    log(f"Source video quality: {quality_label}")
     log(f"Downloading section {start_time} -> {end_time}...")
 
     _setup_ytdlp_env()
@@ -288,7 +349,8 @@ def _download_section_module(
     cookies_path = _get_cookies_path()
 
     ydl_opts: dict[str, Any] = {
-        "format": VIDEO_FORMAT_SELECTOR,
+        "format": format_selector,
+        "noplaylist": True,
         "format_sort": VIDEO_FORMAT_SORT,
         "format_sort_force": True,
         "merge_output_format": "mp4",
@@ -347,7 +409,7 @@ def _download_section_module(
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-    source_cache = _source_cache_path(url, output_path)
+    source_cache = _source_cache_path(url, output_path, source_quality)
     cached_source = _find_cached_source(source_cache)
     if cached_source:
         log("Using the session's cached source video for this clip...")
@@ -374,7 +436,7 @@ def _download_section_module(
             with yt_dlp.YoutubeDL(source_opts) as ydl:
                 ydl.download([url])
         except Exception as exc:
-            raise RuntimeError(f"Failed to download source video: {exc}") from exc
+            raise RuntimeError(f"Failed to download source video at {quality_label}. Refresh available qualities if the selected resolution is no longer available. {exc}") from exc
         full_path = _find_cached_source(source_cache)
         if not full_path:
             raise RuntimeError("Source download finished but its file was not found")
@@ -382,7 +444,7 @@ def _download_section_module(
         return _cut_local_section(full_path, output_path, start_time, end_time, str(ffmpeg_path))
 
     if prefer_cached_source:
-        log("Batch download: downloading a reusable source at best available quality up to 1080p...")
+        log(f"Batch download: downloading a reusable source at {quality_label}...")
         return download_cached_source()
 
     # A force-killed FFmpeg leaves this temporary file behind. It is never a
@@ -514,10 +576,10 @@ def _download_section_module(
             stop_evt.set()
             hb_thread.join(timeout=2)
             ytdlp_external.Popen = original_external_popen
-            log("Ranged download failed; downloading a reusable source at best available quality up to 1080p...")
+            log(f"Ranged download failed; downloading a reusable source at {quality_label}...")
             return download_cached_source()
 
-        raise RuntimeError(f"Failed to download video section: {msg}")
+        raise RuntimeError(f"Failed to download video section at {quality_label}. Refresh available qualities if the selected resolution is no longer available. {msg}")
     finally:
         ytdlp_external.Popen = original_external_popen
         stop_evt.set()

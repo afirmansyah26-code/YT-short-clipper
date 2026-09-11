@@ -47,6 +47,9 @@ yarn-error.log*
 .idea/
 *.swp
 
+# ---- Local implementation proposals ----
+docs/
+
 # ---- OS ----
 .DS_Store
 Thumbs.db

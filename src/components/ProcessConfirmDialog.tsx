@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
-import { X, Film, AlignLeft, Quote, Image as ImageIcon, User, ScanFace, Square, Eye, Sparkles, Zap } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
+import { X, Film, AlignLeft, Quote, Image as ImageIcon, User, ScanFace, Square, Eye, Sparkles, Zap, Check, MonitorUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Card } from "@/components/ui/card";
@@ -29,15 +30,24 @@ const BG_SAMPLE_LABELS: Record<CenteredBackground, string> = {
   blurred: "Blurred",
 };
 
+function qualityDescription(height: number): string {
+  if (height >= 1080) return "Sharper detail";
+  if (height >= 720) return "Balanced";
+  if (height >= 480) return "Smaller file";
+  return "Data saver";
+}
+
+
 interface ProcessConfirmDialogProps {
   clipCount: number;
+  sourceUrl: string;
   /** Whether the source video has an original subtitle track usable for captions. */
   captionsAvailable?: boolean;
   onConfirm: (options: ProcessOptions) => void;
   onCancel: () => void;
 }
 
-export function ProcessConfirmDialog({ clipCount, captionsAvailable = true, onConfirm, onCancel }: ProcessConfirmDialogProps) {
+export function ProcessConfirmDialog({ clipCount, sourceUrl, captionsAvailable = true, onConfirm, onCancel }: ProcessConfirmDialogProps) {
   const { config } = useConfigStore();
 
   const [addCaptions, setAddCaptions] = useState(captionsAvailable);
@@ -47,6 +57,39 @@ export function ProcessConfirmDialog({ clipCount, captionsAvailable = true, onCo
   const [reframeMode, setReframeMode] = useState<ReframeMode>("face");
   const [centeredBackground, setCenteredBackground] = useState<CenteredBackground>("black");
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
+
+  const [sourceQuality, setSourceQuality] = useState("auto");
+  const [qualities, setQualities] = useState<number[]>([]);
+  const [qualityLoading, setQualityLoading] = useState(true);
+  const [qualityError, setQualityError] = useState("");
+  const [qualityNotice, setQualityNotice] = useState("");
+  const [qualityRefresh, setQualityRefresh] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    setQualityLoading(true);
+    setQualityError("");
+    setQualityNotice("");
+    invoke<{ heights: number[] }>("get_video_qualities", { url: sourceUrl })
+      .then(({ heights }) => {
+        if (!active) return;
+        if (!heights.length) throw new Error("No video qualities are available.");
+        setQualities(heights);
+        let saved = "auto";
+        try { saved = localStorage.getItem("ytclip.sourceQuality") || "auto"; } catch { /* Storage unavailable */ }
+        if (saved === "auto" || heights.some((height) => String(height) === saved)) {
+          setSourceQuality(saved);
+        } else {
+          setSourceQuality("auto");
+          setQualityNotice(`Your previous choice (${saved}p) is unavailable. Automatic is selected; choose another quality below if preferred.`);
+        }
+      })
+      .catch((error: unknown) => {
+        if (active) setQualityError(String(error));
+      })
+      .finally(() => { if (active) setQualityLoading(false); });
+    return () => { active = false; };
+  }, [sourceUrl, qualityRefresh]);
 
   // Trap Escape key
   useEffect(() => {
@@ -61,7 +104,9 @@ export function ProcessConfirmDialog({ clipCount, captionsAvailable = true, onCo
   }, [onCancel, previewSrc]);
 
   const handleConfirm = () => {
-    onConfirm({ addCaptions, addHook, addWatermark, addCreditWatermark, reframeMode, centeredBackground });
+    if (qualityLoading || qualityError || !qualities.length) return;
+    try { localStorage.setItem("ytclip.sourceQuality", sourceQuality); } catch { /* Continue with the selected quality */ }
+    onConfirm({ sourceQuality, addCaptions, addHook, addWatermark, addCreditWatermark, reframeMode, centeredBackground });
   };
 
   const currentPreviewSrc = reframeMode === "centered"
@@ -143,6 +188,70 @@ export function ProcessConfirmDialog({ clipCount, captionsAvailable = true, onCo
               Processing <span className="font-semibold text-[var(--color-text-primary)]">{clipCount}</span> clip{clipCount !== 1 ? "s" : ""}. 
               Choose which enhancements to apply:
             </p>
+
+            <div className="space-y-3 rounded-[var(--radius-md)] border border-[var(--color-border-light)] bg-[var(--color-bg-secondary)] p-3.5">
+              <div className="flex items-start gap-2.5">
+                <div className="rounded-md bg-[var(--color-accent)]/10 p-2 text-[var(--color-accent)]">
+                  <MonitorUp className="h-4 w-4" />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-[var(--color-text-primary)]">Source video quality</p>
+                  <p className="text-xs text-[var(--color-text-muted)]">Choose the download size for all selected clips.</p>
+                </div>
+              </div>
+              {qualityLoading ? (
+                <p role="status" className="text-xs text-[var(--color-text-muted)]">Checking available qualities...</p>
+              ) : qualityError ? (
+                <div role="alert" className="space-y-2">
+                  <p className="text-xs text-[var(--color-error)]">Could not load video qualities: {qualityError}</p>
+                  <Button variant="outline" size="sm" onClick={() => setQualityRefresh((n) => n + 1)}>Retry</Button>
+                </div>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    aria-pressed={sourceQuality === "auto"}
+                    onClick={() => { setSourceQuality("auto"); setQualityNotice(""); }}
+                    className={`flex w-full items-center justify-between rounded-md border px-3 py-2.5 text-left transition-colors ${
+                      sourceQuality === "auto"
+                        ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10"
+                        : "border-[var(--color-border-light)] bg-[var(--color-bg-primary)] hover:border-[var(--color-accent)]/50"
+                    }`}
+                  >
+                    <span>
+                      <span className="block text-sm font-medium text-[var(--color-text-primary)]">Automatic</span>
+                      <span className="block text-xs text-[var(--color-text-muted)]">Best available up to 1080p ({qualities[0]}p detected)</span>
+                    </span>
+                    {sourceQuality === "auto" && <Check className="h-4 w-4 shrink-0 text-[var(--color-accent)]" />}
+                  </button>
+                  <div className="grid grid-cols-3 gap-2">
+                    {qualities.map((height) => {
+                      const value = String(height);
+                      const selected = sourceQuality === value;
+                      return (
+                        <button
+                          key={height}
+                          type="button"
+                          aria-pressed={selected}
+                          onClick={() => { setSourceQuality(value); setQualityNotice(""); }}
+                          className={`relative rounded-md border px-2 py-2.5 text-center transition-colors ${
+                            selected
+                              ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10"
+                              : "border-[var(--color-border-light)] bg-[var(--color-bg-primary)] hover:border-[var(--color-accent)]/50"
+                          }`}
+                        >
+                          {selected && <Check className="absolute right-1.5 top-1.5 h-3 w-3 text-[var(--color-accent)]" />}
+                          <span className="block text-sm font-semibold text-[var(--color-text-primary)]">{height}p</span>
+                          <span className="block text-[10px] text-[var(--color-text-muted)]">{qualityDescription(height)}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {qualityNotice && <p role="status" className="text-xs text-[var(--color-warning)]">{qualityNotice}</p>}
+                  <p className="text-[11px] leading-relaxed text-[var(--color-text-muted)]">Your choice is remembered. It controls the source download, not the portrait output size.</p>
+                </>
+              )}
+            </div>
 
             {/* Reframe mode selector */}
             <div className="space-y-2">
@@ -262,7 +371,7 @@ export function ProcessConfirmDialog({ clipCount, captionsAvailable = true, onCo
             <Button variant="outline" onClick={onCancel} className="flex-1">
               Cancel
             </Button>
-            <Button onClick={handleConfirm} className="flex-1 gap-2">
+            <Button onClick={handleConfirm} disabled={qualityLoading || !!qualityError || !qualities.length} className="flex-1 gap-2">
               <Film className="w-4 h-4" />
               Process {clipCount} Clip{clipCount !== 1 ? "s" : ""}
             </Button>

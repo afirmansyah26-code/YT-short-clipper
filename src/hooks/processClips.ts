@@ -4,6 +4,7 @@ export type ReframeMode = "face" | "centered";
 export type CenteredBackground = "black" | "blurred";
 
 export interface ProcessOptions {
+  sourceQuality: string;
   addCaptions: boolean;
   addHook: boolean;
   addWatermark: boolean;

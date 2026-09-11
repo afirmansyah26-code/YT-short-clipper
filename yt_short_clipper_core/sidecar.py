@@ -224,6 +224,12 @@ Return ONLY valid JSON in this exact format:
             # Fallback: return raw text as title
             return {"title": raw, "description": ""}
 
+    if command == "get_video_qualities":
+        from yt_short_clipper_core.video_processor import get_video_qualities
+        if not payload.get("url"):
+            raise SidecarError("Missing payload.url")
+        return get_video_qualities(payload["url"])
+
     if command == "detect_gpu":
         from yt_short_clipper_core.gpu import detect_gpu
 

@@ -34,6 +34,38 @@ def _load_caption_words(session_path: Path, log: LogFn) -> list[dict[str, Any]]:
         return []
 
 
+def _load_video_channel(session_path: Path, log: LogFn) -> str:
+    """Load the source channel saved when highlights were generated."""
+    session_data_file = session_path / "session_data.json"
+    try:
+        with open(session_data_file, "r", encoding="utf-8") as f:
+            session_data = json.load(f)
+        return str((session_data.get("video_info") or {}).get("channel") or "").strip()
+    except (OSError, ValueError, TypeError) as exc:
+        log(f"Could not read source channel from session metadata: {str(exc)[:200]}")
+        return ""
+
+
+def _resolve_credit_watermark(
+    config: dict[str, Any] | None,
+    channel: str,
+    log: LogFn,
+) -> dict[str, Any] | None:
+    if not config:
+        return None
+    resolved = dict(config)
+    text = str(resolved.get("text") or "")
+    if "{channel}" not in text:
+        return resolved
+    if channel:
+        resolved["text"] = text.replace("{channel}", channel)
+        log(f"Credit watermark channel: {channel}")
+    else:
+        resolved["text"] = text.replace("{channel}", "Unknown channel")
+        log("Source channel is unavailable; using 'Unknown channel' in credit watermark")
+    return resolved
+
+
 def _words_for_clip(
     all_words: list[dict[str, Any]],
     clip_start: float,
@@ -88,6 +120,7 @@ def process_selected_highlights(
     add_captions = options.get("addCaptions", False)
     add_watermark = options.get("addWatermark", False)
     add_credit_watermark = options.get("addCreditWatermark", False)
+    video_channel = _load_video_channel(session_path, log) if add_credit_watermark else ""
 
     # Word-level caption timing for the full source video (from the original
     # subtitle track). Empty if unavailable — captions are then skipped.
@@ -124,7 +157,11 @@ def process_selected_highlights(
             end_time=h["end_time"],
             output_path=section_path,
             log=log,
-            prefer_cached_source=total > 1,
+            # Ranged FFmpeg downloads repeatedly stall on Googlevideo URLs.
+            # Download the selected source quality once and cut locally for
+            # both single-clip and multi-clip runs.
+            prefer_cached_source=True,
+            source_quality=options.get("sourceQuality", "auto"),
         )
         log(f"[{i}/{total}] Section downloaded: {video_path}")
 
@@ -182,7 +219,11 @@ def process_selected_highlights(
         # Step 5: Watermark overlay (logo + credit text)
         if add_watermark or add_credit_watermark:
             wm_config = ai.get("watermark") if add_watermark else None
-            credit_config = ai.get("credit_watermark") if add_credit_watermark else None
+            credit_config = _resolve_credit_watermark(
+                ai.get("credit_watermark") if add_credit_watermark else None,
+                video_channel,
+                log,
+            )
 
             watermark_output_path = str(temp_dir / f"watermarked_{i:03d}.mp4")
             video_path = apply_watermark(
@@ -210,6 +251,7 @@ def process_selected_highlights(
             "start_time": h["start_time"],
             "end_time": h["end_time"],
             "duration_seconds": h.get("duration_seconds", 0),
+            "source_quality": options.get("sourceQuality", "auto"),
             "has_hook": add_hook and bool(h.get("hook_text")),
             "has_captions": clip_had_captions,
             "youtube_title": h.get("title", ""),
