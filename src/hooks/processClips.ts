@@ -11,6 +11,8 @@ export interface ProcessOptions {
   addCreditWatermark: boolean;
   reframeMode: ReframeMode;
   centeredBackground: CenteredBackground;
+  /** Internal lifecycle id used to persist processing status. */
+  processingJobId?: string;
 }
 
 export type ProcessClipsEvent = { type: "log"; message: string };

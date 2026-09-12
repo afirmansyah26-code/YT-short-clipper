@@ -8,6 +8,8 @@ import {
   Clock,
   Film,
   CheckCircle2,
+  Activity,
+  AlertCircle,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -19,6 +21,7 @@ import {
   type SessionSummary,
 } from "@/hooks/sessions";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useClipProcessingStore } from "@/stores/clipProcessingStore";
 
 function formatDate(iso: string): string {
   if (!iso) return "";
@@ -33,6 +36,12 @@ function formatDate(iso: string): string {
   });
 }
 
+function sameSessionPath(left: string | undefined, right: string): boolean {
+  if (!left) return false;
+  const normalize = (value: string) => value.replace(/[\\/]+/g, "/").replace(/\/$/, "").toLowerCase();
+  return normalize(left) === normalize(right);
+}
+
 export function LibraryPage() {
   const navigate = useNavigate();
   const { setSession } = useSessionStore();
@@ -40,6 +49,7 @@ export function LibraryPage() {
   const [loading, setLoading] = useState(true);
   const [openingDir, setOpeningDir] = useState<string | null>(null);
   const [deletingDir, setDeletingDir] = useState<string | null>(null);
+  const activeJob = useClipProcessingStore((state) => state.job?.status === "running" ? state.job : null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -64,12 +74,16 @@ export function LibraryPage() {
       const session = await loadSession(summary.sessionDir);
       setSession(session, "library");
 
-      if (summary.status === "completed") {
-        // Already processed — go straight to highlights with a note
-        toast.info("This session has already been processed");
+      if (activeJob && sameSessionPath(activeJob.sessionDir, summary.sessionDir)) {
+        navigate("/processing-clips");
+      } else {
+        if (summary.status === "completed") {
+          toast.info("This session has already been processed");
+        } else if (summary.status === "processing" || summary.status === "interrupted") {
+          toast.warning("This processing session was interrupted. Review the highlights before retrying.");
+        }
+        navigate("/highlights");
       }
-
-      navigate("/highlights");
     } catch (err) {
       console.error("Failed to open session", err);
       toast.error("Failed to open session");
@@ -80,6 +94,10 @@ export function LibraryPage() {
 
   const handleDelete = async (summary: SessionSummary, e: React.MouseEvent) => {
     e.stopPropagation();
+    if (activeJob && sameSessionPath(activeJob.sessionDir, summary.sessionDir)) {
+      toast.error("Stop clip processing before deleting this session");
+      return;
+    }
     setDeletingDir(summary.sessionDir);
     try {
       await deleteSession(summary.sessionDir);
@@ -127,7 +145,9 @@ export function LibraryPage() {
         </Card>
       ) : (
         <div className="space-y-3">
-          {sessions.map((s) => (
+          {sessions.map((s) => {
+            const isActiveSummary = activeJob ? sameSessionPath(activeJob.sessionDir, s.sessionDir) : false;
+            return (
             <Card
               key={s.sessionDir}
               className="p-4 cursor-pointer transition-all duration-200 hover:border-[var(--color-accent)]/40 hover:shadow-[var(--shadow)]"
@@ -155,10 +175,20 @@ export function LibraryPage() {
                         <CheckCircle2 className="w-3.5 h-3.5" />
                         Ready
                       </span>
+                    ) : s.status === "processing" && isActiveSummary ? (
+                      <span className="flex items-center gap-1 text-[var(--color-accent)]">
+                        <Activity className="w-3.5 h-3.5 animate-pulse" />
+                        Processing
+                      </span>
                     ) : s.status === "completed" ? (
                       <span className="flex items-center gap-1 text-[var(--color-accent)]">
                         <CheckCircle2 className="w-3.5 h-3.5" />
                         Done
+                      </span>
+                    ) : s.status === "failed" || s.status === "interrupted" || (s.status === "processing" && !isActiveSummary) ? (
+                      <span className="flex items-center gap-1 text-[var(--color-warning)]">
+                        <AlertCircle className="w-3.5 h-3.5" />
+                        {s.status === "failed" ? "Failed" : "Interrupted"}
                       </span>
                     ) : null}
                   </div>
@@ -172,7 +202,7 @@ export function LibraryPage() {
                       variant="ghost"
                       size="icon"
                       onClick={(e) => handleDelete(s, e)}
-                      disabled={deletingDir === s.sessionDir}
+                      disabled={deletingDir === s.sessionDir || (activeJob ? sameSessionPath(activeJob.sessionDir, s.sessionDir) : false)}
                       className="h-8 w-8 text-[var(--color-text-muted)] hover:text-[var(--color-error)]"
                     >
                       {deletingDir === s.sessionDir ? (
@@ -185,7 +215,8 @@ export function LibraryPage() {
                 </div>
               </div>
             </Card>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

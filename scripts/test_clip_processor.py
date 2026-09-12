@@ -50,6 +50,25 @@ class ClipProcessorTests(unittest.TestCase):
                 )
             self.assertTrue(download.call_args.kwargs["prefer_cached_source"])
             self.assertEqual(download.call_args.kwargs["source_quality"], "720")
+            session = json.loads((root / "session_data.json").read_text(encoding="utf-8"))
+            self.assertEqual(session["status"], "completed")
+            self.assertEqual(session["processed_highlights"], [0])
+
+    def test_processing_failure_is_persisted_atomically(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "session_data.json").write_text(
+                json.dumps({"status": "highlights_found", "highlights": []}), encoding="utf-8"
+            )
+            with patch.object(cp, "_process_selected_highlights_impl", side_effect=RuntimeError("download failed")):
+                with self.assertRaisesRegex(RuntimeError, "download failed"):
+                    cp.process_selected_highlights(
+                        "https://example.com", [{"title": "Test"}], str(root), {}, {}, lambda message: None
+                    )
+            session = json.loads((root / "session_data.json").read_text(encoding="utf-8"))
+            self.assertEqual(session["status"], "failed")
+            self.assertEqual(session["processing_error"], "download failed")
+            self.assertFalse((root / "session_data.json.tmp").exists())
 
 
 if __name__ == "__main__":

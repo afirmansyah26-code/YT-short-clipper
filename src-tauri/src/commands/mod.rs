@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use tauri::ipc::Channel;
@@ -10,6 +11,23 @@ use tauri::Manager;
 
 const REQUIRED_COOKIES: [&str; 6] = ["SID", "HSID", "SSID", "APISID", "SAPISID", "LOGIN_INFO"];
 const SECURE_COOKIE_PREFIXES: [&str; 2] = ["__Secure-1P", "__Secure-3P"];
+
+#[derive(Clone, Default)]
+pub struct ClipProcessingState {
+    pub active_session: Arc<Mutex<Option<String>>>,
+}
+
+struct ProcessingReset {
+    active_session: Arc<Mutex<Option<String>>>,
+}
+
+impl Drop for ProcessingReset {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.active_session.lock() {
+            *active = None;
+        }
+    }
+}
 
 #[cfg(windows)]
 const SIDECAR_BINARY: &str = "ytclip-sidecar-x86_64-pc-windows-msvc.exe";
@@ -322,7 +340,12 @@ pub struct SessionSummary {
 }
 
 #[tauri::command]
-pub fn list_sessions(app: tauri::AppHandle) -> Result<Vec<SessionSummary>, String> {
+pub fn list_sessions(app: tauri::AppHandle, state: tauri::State<'_, ClipProcessingState>) -> Result<Vec<SessionSummary>, String> {
+    let active_session = state
+        .active_session
+        .lock()
+        .map_err(|_| "Processing state is unavailable".to_string())?
+        .clone();
     let mut dirs_to_scan = Vec::new();
     if let Ok(active_out) = resolve_output_dir(&app) {
         dirs_to_scan.push(active_out.join("sessions"));
@@ -379,6 +402,23 @@ pub fn list_sessions(app: tauri::AppHandle) -> Result<Vec<SessionSummary>, Strin
             let video_info = value.get("video_info").cloned().unwrap_or_default();
             let highlights = value.get("highlights").and_then(|h| h.as_array());
 
+            let stored_status = value
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let status = if stored_status == "processing"
+                && active_session
+                    .as_deref()
+                    .map(|path| path.eq_ignore_ascii_case(&s_dir))
+                    .unwrap_or(false)
+            {
+                "processing".to_string()
+            } else if stored_status == "processing" {
+                "interrupted".to_string()
+            } else {
+                stored_status.to_string()
+            };
+
             summaries.push(SessionSummary {
                 session_dir: s_dir,
                 url: value
@@ -397,11 +437,7 @@ pub fn list_sessions(app: tauri::AppHandle) -> Result<Vec<SessionSummary>, Strin
                     .unwrap_or("")
                     .to_string(),
                 highlight_count: highlights.map(|h| h.len()).unwrap_or(0),
-                status: value
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string(),
+                status,
                 created_at: value
                     .get("created_at")
                     .and_then(|v| v.as_str())
@@ -429,7 +465,20 @@ pub fn load_session(session_dir: String) -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-pub fn delete_session(session_dir: String) -> Result<(), String> {
+pub fn delete_session(state: tauri::State<'_, ClipProcessingState>, session_dir: String) -> Result<(), String> {
+    {
+        let active = state
+            .active_session
+            .lock()
+            .map_err(|_| "Processing state is unavailable".to_string())?;
+        if active
+            .as_deref()
+            .map(|path| path.eq_ignore_ascii_case(&session_dir))
+            .unwrap_or(false)
+        {
+            return Err("Cannot delete a session while clip processing is active".to_string());
+        }
+    }
     let path = PathBuf::from(&session_dir);
     if !path.exists() {
         return Ok(());
@@ -906,6 +955,7 @@ pub fn open_path_in_explorer(path: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn process_clips(
     app: tauri::AppHandle,
+    state: tauri::State<'_, ClipProcessingState>,
     url: String,
     highlights: serde_json::Value,
     session_dir: String,
@@ -913,7 +963,19 @@ pub async fn process_clips(
     ai: serde_json::Value,
     on_event: Channel<ProcessClipsEvent>,
 ) -> Result<serde_json::Value, String> {
+    let active_session = state.active_session.clone();
+    {
+        let mut active = active_session
+            .lock()
+            .map_err(|_| "Processing state is unavailable".to_string())?;
+        if active.is_some() {
+            return Err("processing_already_running".to_string());
+        }
+        *active = Some(session_dir.clone());
+    }
+
     tauri::async_runtime::spawn_blocking(move || {
+        let _reset = ProcessingReset { active_session };
         let cookies_path = cookies_dir(&app)?.join("cookies.txt");
         let cookies_status = read_cookies_status_for_path(cookies_path.clone())?;
         if !cookies_status.valid {

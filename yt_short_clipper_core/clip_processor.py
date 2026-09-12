@@ -1,6 +1,7 @@
 """Process selected highlights: download → portrait → hook → caption → watermark."""
 
 import json
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +15,45 @@ from .srt_parser import parse_timestamp
 from .watermark import apply_watermark
 
 LogFn = Callable[[str], None]
+
+def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    """Persist session metadata atomically so Library never reads a partial JSON file."""
+    temp_path = path.with_name(path.name + ".tmp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(temp_path, path)
+
+
+def _update_session_status(session_dir: str, status: str, **fields: Any) -> None:
+    """Best-effort lifecycle update; processing must continue if metadata is unavailable."""
+    path = Path(session_dir) / "session_data.json"
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        data["status"] = status
+        data.update({key: value for key, value in fields.items() if value is not None})
+        _atomic_write_json(path, data)
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def _mark_processed_highlight(session_dir: str, highlight_index: int) -> None:
+    """Record each clip immediately so an interrupted batch can resume safely."""
+    path = Path(session_dir) / "session_data.json"
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        processed = data.get("processed_highlights", [])
+        if highlight_index not in processed:
+            processed.append(highlight_index)
+        data["processed_highlights"] = sorted(set(processed))
+        data["clips_processed"] = len(data["processed_highlights"])
+        _atomic_write_json(path, data)
+    except (OSError, ValueError, TypeError):
+        pass
 
 
 def _load_caption_words(session_path: Path, log: LogFn) -> list[dict[str, Any]]:
@@ -93,7 +133,7 @@ def _run_portrait(input_path: str, output_path: str, options: dict[str, Any], lo
     return convert_to_portrait(input_path, output_path, log)
 
 
-def process_selected_highlights(
+def _process_selected_highlights_impl(
     url: str,
     highlights: list[dict[str, Any]],
     session_dir: str,
@@ -145,6 +185,7 @@ def process_selected_highlights(
                 "title": h.get("title", ""),
                 "skipped": True,
             })
+            _mark_processed_highlight(session_dir, highlight_index)
             continue
 
         section_path = str(temp_dir / f"section_{i:03d}.mp4")
@@ -267,6 +308,7 @@ def process_selected_highlights(
             "output_path": str(output_file),
             "title": h.get("title", ""),
         })
+        _mark_processed_highlight(session_dir, highlight_index)
 
         # Cleanup temp files for this clip
         for temp_file in temp_dir.glob(f"*_{i:03d}.*"):
@@ -290,9 +332,9 @@ def process_selected_highlights(
         with open(session_data_file, "r", encoding="utf-8") as f:
             session_data = json.load(f)
         session_data["status"] = "completed"
+        session_data["processing_failed_at"] = ""
+        session_data["processing_error"] = ""
         session_data["completed_at"] = datetime.now().isoformat()
-        session_data["clips_processed"] = total
-
         # Track which highlight indices have been processed
         processed_indices = session_data.get("processed_highlights", [])
         for r in results:
@@ -300,9 +342,9 @@ def process_selected_highlights(
             if idx is not None and idx not in processed_indices and not r.get("skipped"):
                 processed_indices.append(idx)
         session_data["processed_highlights"] = sorted(set(processed_indices))
+        session_data["clips_processed"] = len(session_data["processed_highlights"])
 
-        with open(session_data_file, "w", encoding="utf-8") as f:
-            json.dump(session_data, f, indent=2, ensure_ascii=False)
+        _atomic_write_json(session_data_file, session_data)
 
     log(f"All {total} clips processed successfully!")
 
@@ -312,3 +354,44 @@ def process_selected_highlights(
         "total_clips": total,
         "results": results,
     }
+
+
+def process_selected_highlights(
+    url: str,
+    highlights: list[dict[str, Any]],
+    session_dir: str,
+    options: dict[str, Any],
+    ai: dict[str, Any],
+    log: LogFn,
+) -> dict[str, Any]:
+    """Run a clip batch while persisting processing, completion, and failure status."""
+    started_at = datetime.now().isoformat()
+    selected_indices = [
+        h.get("_highlight_index", index) for index, h in enumerate(highlights)
+    ]
+    _update_session_status(
+        session_dir,
+        "processing",
+        processing_job_id=options.get("processingJobId"),
+        processing_started_at=started_at,
+        processing_failed_at="",
+        processing_error="",
+        processing_highlight_indices=selected_indices,
+    )
+    try:
+        return _process_selected_highlights_impl(
+            url=url,
+            highlights=highlights,
+            session_dir=session_dir,
+            options=options,
+            ai=ai,
+            log=log,
+        )
+    except Exception as exc:
+        _update_session_status(
+            session_dir,
+            "failed",
+            processing_failed_at=datetime.now().isoformat(),
+            processing_error=str(exc)[:2000],
+        )
+        raise

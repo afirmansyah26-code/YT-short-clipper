@@ -3,6 +3,9 @@ import { NavLink } from "react-router-dom";
 import {
   PlusCircle,
   FolderOpen,
+  Activity,
+  AlertCircle,
+  CheckCircle2,
   Bot,
   Settings,
   PanelLeftClose,
@@ -16,6 +19,7 @@ import { APP_VERSION } from "@/config/version";
 import { menuIcon } from "@/config/menuIcons";
 import { DEFAULT_MENU_ITEMS, fetchMenu, readCachedMenu, type MenuItem } from "@/hooks/menu";
 import { AdvertiseDialog } from "@/components/AdvertiseDialog";
+import { useClipProcessingStore } from "@/stores/clipProcessingStore";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 
 const navItems = [
@@ -28,6 +32,7 @@ const navItems = [
 export function Sidebar() {
   const { sidebarCollapsed, toggleSidebar, availableUpdate, theme, toggleTheme } = useAppStore();
   const [showAdvertise, setShowAdvertise] = useState(false);
+  const processingJob = useClipProcessingStore((state) => state.job);
 
   // Render from cache (or the built-in defaults) on the first paint, then
   // refresh in the background. The sidebar never waits on the network.
@@ -79,6 +84,35 @@ export function Sidebar() {
             {!sidebarCollapsed && <span>{item.label}</span>}
           </NavLink>
         ))}
+
+        {processingJob && (
+          <NavLink
+            to="/processing-clips"
+            className={({ isActive }) =>
+              cn(
+                "flex items-center gap-3 px-3 py-2.5 rounded-[var(--radius-sm)] text-sm font-medium transition-all duration-200",
+                isActive
+                  ? "bg-[var(--color-accent-light)] text-[var(--color-accent)] border-l-[3px] border-[var(--color-accent)] ml-0 pl-2.5"
+                  : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]",
+                sidebarCollapsed && "justify-center px-0"
+              )
+            }
+            title="Open clip processing"
+          >
+            {processingJob.status === "running" ? (
+              <Activity className="w-5 h-5 shrink-0 animate-pulse" />
+            ) : processingJob.status === "failed" ? (
+              <AlertCircle className="w-5 h-5 shrink-0 text-[var(--color-error)]" />
+            ) : (
+              <CheckCircle2 className="w-5 h-5 shrink-0 text-[var(--color-success)]" />
+            )}
+            {!sidebarCollapsed && (
+              <span className="truncate">
+                {processingJob.status === "running" ? "Processing clips" : processingJob.status === "failed" ? "Processing failed" : "Processing complete"}
+              </span>
+            )}
+          </NavLink>
+        )}
 
         {/* External links, served by the menu API */}
         {menuItems.length > 0 && (

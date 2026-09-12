@@ -18,6 +18,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useConfigStore } from "@/stores/configStore";
+import { startClipProcessing } from "@/services/clipProcessingManager";
 import type { Highlight } from "@/hooks/highlights";
 import { ProcessConfirmDialog } from "@/components/ProcessConfirmDialog";
 
@@ -54,12 +56,17 @@ export function HighlightSelectionPage() {
   const navigate = useNavigate();
   const { session, origin, selectedIndices, toggleSelected, selectAll, deselectAll, getSelectedHighlights } =
     useSessionStore();
+  const { config, loaded: configLoaded, load: loadConfig } = useConfigStore();
 
   const [showProcessDialog, setShowProcessDialog] = useState(false);
 
   useEffect(() => {
     if (!session) navigate("/");
   }, [session, navigate]);
+
+  useEffect(() => {
+    if (!configLoaded) void loadConfig();
+  }, [configLoaded, loadConfig]);
 
   if (!session) return null;
 
@@ -138,7 +145,7 @@ export function HighlightSelectionPage() {
       <div className="sticky bottom-0 -mx-6 px-6 py-4 bg-gradient-to-t from-[var(--color-bg-secondary)] via-[var(--color-bg-secondary)] to-transparent">
         <Button
           size="lg"
-          disabled={selectedCount === 0}
+          disabled={selectedCount === 0 || !configLoaded}
           onClick={() => setShowProcessDialog(true)}
           className="w-full h-13 gap-2 shadow-[var(--shadow)]"
         >
@@ -161,14 +168,46 @@ export function HighlightSelectionPage() {
               const originalIndex = highlights.indexOf(h);
               return { ...h, _highlight_index: originalIndex };
             });
-            navigate("/processing-clips", {
-              state: {
-                url: session.url,
-                highlights: highlightsWithIndex,
-                sessionDir: session.session_dir,
-                options,
+            startClipProcessing({
+              url: session.url,
+              highlights: highlightsWithIndex,
+              sessionDir: session.session_dir,
+              options,
+              ai: {
+                api_key: config.ai.apiKey,
+                base_url: config.ai.baseUrl,
+                model: config.ai.model,
+                system_message: config.ai.systemMessage,
+                temperature: 1.0,
+                hook_style: {
+                  font_name: config.hookStyle.fontName,
+                  font_path: config.hookStyle.fontPath,
+                  font_size: config.hookStyle.fontSize,
+                  font_color: config.hookStyle.fontColor,
+                  bg_color: config.hookStyle.bgColor,
+                  corner_radius: config.hookStyle.cornerRadius,
+                  position_x: config.hookStyle.positionX,
+                  position_y: config.hookStyle.positionY,
+                  duration_seconds: config.hookStyle.durationSeconds,
+                },
+                watermark: {
+                  image_path: config.watermark.imagePath,
+                  position_x: config.watermark.positionX,
+                  position_y: config.watermark.positionY,
+                  opacity: config.watermark.opacity,
+                  scale: config.watermark.scale,
+                },
+                credit_watermark: {
+                  text: config.creditWatermark.text,
+                  color: config.creditWatermark.color,
+                  font_size: config.creditWatermark.fontSize,
+                  opacity: config.creditWatermark.opacity,
+                  position_x: config.creditWatermark.positionX,
+                  position_y: config.creditWatermark.positionY,
+                },
               },
             });
+            navigate("/processing-clips");
           }}
           onCancel={() => setShowProcessDialog(false)}
         />

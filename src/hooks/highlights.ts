@@ -37,6 +37,13 @@ export interface SessionData {
   created_at: string;
   status: string;
   processed_highlights?: number[];
+  processing_job_id?: string;
+  processing_started_at?: string;
+  processing_failed_at?: string;
+  processing_error?: string;
+  processing_highlight_indices?: number[];
+  clips_processed?: number;
+  completed_at?: string;
 }
 
 export interface AIRequestSettings {
