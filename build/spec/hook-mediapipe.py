@@ -1,22 +1,29 @@
-"""Custom PyInstaller hook for mediapipe to ensure all submodules and data files are collected."""
+"""Custom PyInstaller hook for mediapipe to ensure required runtime modules and data files are collected."""
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
-# Force import of mediapipe.solutions before collect_submodules runs
-# This ensures lazy-loaded modules are discovered
+# Force import of the MediaPipe Tasks API before collecting submodules so the
+# modules used by portrait conversion are discovered. MediaPipe 1.x no longer
+# ships the legacy mediapipe.python.solutions namespace.
 try:
     import mediapipe
-    import mediapipe.python.solutions
-    import mediapipe.python.solutions.face_mesh
-    import mediapipe.python.solutions.face_detection
-    import mediapipe.python.solutions.drawing_utils
-    import mediapipe.python.solutions.drawing_styles
     import mediapipe.tasks.python
     import mediapipe.tasks.python.vision
 except ImportError:
     pass
 
-hiddenimports = collect_submodules('mediapipe')
+
+def _is_runtime_submodule(name):
+    parts = name.split('.')
+    return not any(
+        part in {'test', 'tests', 'conftest'}
+        or part.startswith('test_')
+        or part.endswith('_test')
+        for part in parts
+    )
+
+
+hiddenimports = collect_submodules('mediapipe', filter=_is_runtime_submodule)
 datas = collect_data_files('mediapipe', include_py_files=False)
 
 # Also collect the protobuf model files

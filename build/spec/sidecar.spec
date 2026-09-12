@@ -17,14 +17,28 @@ try:
 except ImportError as e:
     print(f"[sidecar.spec] WARNING: Could not pre-import mediapipe: {e}")
 
-# Collect ALL mediapipe and cv2 data and submodules
+# Collect runtime modules and data. Exclude test suites because the current
+# MediaPipe and NumPy distributions ship test packages that reference optional
+# build-time dependencies and stale namespaces (for example mediapipe.python).
 mediapipe_data = collect_data_files('mediapipe', include_py_files=False)
-mediapipe_submodules = collect_submodules('mediapipe')
+
+
+def _is_runtime_submodule(name):
+    parts = name.split('.')
+    return not any(
+        part in {'test', 'tests', 'conftest'}
+        or part.startswith('test_')
+        or part.endswith('_test')
+        for part in parts
+    )
+
+
+mediapipe_submodules = collect_submodules('mediapipe', filter=_is_runtime_submodule)
 
 opencv_data = collect_data_files('cv2')
 opencv_submodules = collect_submodules('cv2')
 
-numpy_submodules = collect_submodules('numpy')
+numpy_submodules = collect_submodules('numpy', filter=_is_runtime_submodule)
 ytdlp_submodules = collect_submodules('yt_dlp')
 
 # Pillow
@@ -60,7 +74,6 @@ a = Analysis(
         'mediapipe.tasks.python.vision.face_detector',
         'mediapipe.tasks.python.vision.image_classifier',
         'mediapipe.tasks.python.vision.object_detector',
-        'mediapipe.python',
         *mediapipe_submodules,
         *opencv_submodules,
         *numpy_submodules,
